@@ -25,7 +25,7 @@ from sklearn.metrics import roc_curve
 # =====================================================
 
 
-csv_path = r"C:\Users\marti\OneDrive - The University of Western Ontario\DS3000_Project_Group18\chess_games.csv"
+csv_path = r"C:\Users\konra\DS3000_Project_Group18\chess_games (1).csv"
 
 
 print("Loading CSV from:", csv_path)
@@ -251,19 +251,16 @@ print(classification_report(y_test, y_pred_rf, digits=4))
 
 
 def elo_bracket(r):
-    if r <= 599:
-        return 'Under 600'
-    elif r <= 999:
-        return '600–999'
-    elif r <= 1399:
-        return '1000–1399'
-    elif r <= 1799:
+    if r < 800:
+        return 'Under 800'
+    elif r < 1400:
+        return 'Under 1400'
+    elif r < 1800:
         return '1400–1799'
-    elif r <= 2199:
+    elif r < 2200:
         return '1800–2199'
     else:
         return '2200+'
-
 
 
 df['elo_bracket'] = df['avg_elo'].apply(elo_bracket)
