@@ -145,7 +145,7 @@ print(df['tc_bucket'].value_counts())
 # 4. DOWNSAMPLE FOR ML (AVOID 60GB ARRAY)
 # =====================================================
 
-N = 200_000  # you can try 300_000 if your PC is decent
+N = 500_000  # you can try 300_000 if your PC is decent
 if len(df) > N:
     df_small = df.sample(n=N, random_state=42).copy()
     print(f"\nDownsampled to {N} rows for ML.")
