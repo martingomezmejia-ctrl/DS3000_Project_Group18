@@ -10,9 +10,7 @@ We use a large Lichess game dataset (~6M games) and train several classification
 - The opening played (ECO code)  
 - The time control category (bullet, blitz, rapid, classical)
 
-We compare a family of **Logistic Regression** models against a family of **Random Forest** models to understand the trade-off between interpretability and predictive performance.
-
-And we look at the best chess opening per ELO bracket.
+We compare a family of **Logistic Regression** models against a family of **Random Forest** models to understand the trade-off between interpretability and predictive performance. And we look at the best chess openings per ELO bracket.
 
 ---
 
