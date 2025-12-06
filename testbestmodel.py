@@ -3,12 +3,13 @@
 
 import pandas as pd
 import numpy as np
-import time  # for timing
+import time  # for timing model training
 
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     accuracy_score,
@@ -24,19 +25,21 @@ import matplotlib.pyplot as plt
 # 1. LOAD DATA
 # =====================================================
 
+# Path to the Lichess / chess game dataset (local CSV file)
 csv_path = r"C:\Users\marti\OneDrive - The University of Western Ontario\DS3000_Project_Group18\chess_games.csv"
 
 print("Loading CSV from:", csv_path)
 df = pd.read_csv(csv_path)
 
-print("\nRaw shape:", df.shape)
-print("Columns:", df.columns.tolist())
+print("\nRaw shape:", df.shape)         # (rows, columns) before cleaning
+print("Columns:", df.columns.tolist())  # original column names
 
 
 # =====================================================
 # 2. CLEANING & FEATURE ENGINEERING
 # =====================================================
 
+# Standardize column names to something shorter / easier to work with
 df = df.rename(columns={
     'WhiteElo': 'white_elo',
     'BlackElo': 'black_elo',
@@ -46,33 +49,49 @@ df = df.rename(columns={
     'TimeControl': 'time_control'
 })
 
+# Keep only the columns we actually use in this experiment
 df = df[['white_elo', 'black_elo', 'result', 'eco', 'opening_name', 'time_control']]
+
+# Drop rows where Elo or result is missing
 df = df.dropna(subset=['white_elo', 'black_elo', 'result'])
 
+# Convert Elo ratings to numeric (coerce errors to NaN) and drop NaNs
 df['white_elo'] = pd.to_numeric(df['white_elo'], errors='coerce')
 df['black_elo'] = pd.to_numeric(df['black_elo'], errors='coerce')
 df = df.dropna(subset=['white_elo', 'black_elo'])
 
+# Keep only decisive games: white win (1-0) or black win (0-1)
 df = df[df['result'].isin(['1-0', '0-1'])].copy()
 
+# Target variable: 1 if white wins, 0 if white loses
 df['white_win'] = (df['result'] == '1-0').astype(int)
 
+# ---- Elo-based features ----
+# Elo difference (positive means white is higher rated)
 df['elo_diff'] = df['white_elo'] - df['black_elo']
+# Average Elo of the two players (proxy for overall game strength)
 df['avg_elo'] = (df['white_elo'] + df['black_elo']) / 2
-
+# Indicator: 1 if white is higher rated, 0 otherwise
 df['white_higher'] = (df['elo_diff'] > 0).astype(int)
+# Absolute Elo difference (magnitude of rating mismatch)
 df['elo_diff_abs'] = df['elo_diff'].abs()
+# Squared Elo difference to allow for non-linear effect in Logistic Regression
 df['elo_diff_sq'] = df['elo_diff'] ** 2
 
+# ---- Opening + time control features ----
 df['eco'] = df['eco'].fillna('UNKNOWN').astype(str)
+# ECO code truncated to first 3 characters (e.g., "C65", "B20")
 df['eco_code3'] = df['eco'].str[:3]
+
+# Time control as string, with unknowns filled
 df['time_control'] = df['time_control'].fillna('UNKNOWN').astype(str)
 
 
 def parse_time_control(tc: str) -> str:
     """
-    Parse Lichess-style time control strings like '600+5' into buckets.
-    Returns one of: 'bullet', 'blitz', 'rapid', 'classical', 'unknown'.
+    Convert raw time control string (e.g. '600+0') into coarse bucket:
+    'bullet', 'blitz', 'rapid', or 'classical'.
+    If format is not recognized, return 'unknown'.
     """
     if tc in ['UNKNOWN', '?', None] or tc == '':
         return 'unknown'
@@ -84,6 +103,7 @@ def parse_time_control(tc: str) -> str:
     except ValueError:
         return 'unknown'
 
+    # Thresholds in seconds for each time category
     if base <= 180:
         return 'bullet'
     elif base <= 600:
@@ -94,10 +114,12 @@ def parse_time_control(tc: str) -> str:
         return 'classical'
 
 
+# Add a categorical feature for time control bucket
 df['tc_bucket'] = df['time_control'].apply(parse_time_control)
 
+# Collapse rare ECO codes into 'OTHER' to avoid very sparse one-hot columns
 eco_counts = df['eco_code3'].value_counts()
-rare_ecos = eco_counts[eco_counts < 200].index
+rare_ecos = eco_counts[eco_counts < 100].index
 df['eco_code3_clean'] = df['eco_code3'].where(~df['eco_code3'].isin(rare_ecos), 'OTHER')
 
 print("\nAfter cleaning:", df.shape)
@@ -108,8 +130,10 @@ print(df.head())
 # 3. DOWNSAMPLE FOR ML
 # =====================================================
 
+# Limit dataset size for computational reasons (original file is huge)
 N = 500_000
 if len(df) > N:
+    # Random sample of N rows, with fixed seed for reproducibility
     df_small = df.sample(n=N, random_state=42).copy()
     print(f"\nDownsampled to {N}")
 else:
@@ -122,26 +146,35 @@ print("ML dataframe shape:", df_small.shape)
 # 4. BUILD ML DATASET
 # =====================================================
 
+# Numerical features used in the model
 num_features = ['elo_diff', 'avg_elo', 'elo_diff_abs', 'elo_diff_sq']
+
+# Categorical features used in the model
+# Note: 'white_higher' is a binary feature but treated as a categorical here
 cat_features = ['eco_code3_clean', 'tc_bucket', 'white_higher']
 
+# Keep only selected features + target column
 df_model = df_small[num_features + cat_features + ['white_win']].dropna()
+
+# X: feature matrix, y: target (1 = white wins, 0 = black wins)
 X = df_model[num_features + cat_features]
 y = df_model['white_win'].values
 
-print("\nClass balance (0=Black win, 1=White win):", np.bincount(y))
+print("\nClass balance:", np.bincount(y))  # show how many white wins vs losses
 
+# Train/test split (80/20), stratified to preserve win/loss ratio in both sets
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, stratify=y, random_state=42
 )
 
-print("Train shape:", X_train.shape, "Test shape:", X_test.shape)
-
 
 # =====================================================
-# 5. LOGISTIC REGRESSION PIPELINE + HYPERPARAMETER SEARCH
+# 5. PREPROCESSORS FOR DIFFERENT MODELS
 # =====================================================
 
+# Logistic Regression:
+#   - One-hot encode cats
+#   - Standardize numerics
 preprocess_lr = ColumnTransformer(
     transformers=[
         ('cat', OneHotEncoder(handle_unknown='ignore'), cat_features),
@@ -149,63 +182,264 @@ preprocess_lr = ColumnTransformer(
     ]
 )
 
-base_lr_pipeline = Pipeline(steps=[
-    ('preprocess', preprocess_lr),
-    ('model', LogisticRegression(max_iter=2000, n_jobs=-1))
-])
-
-# Grid of hyperparameters to search
-param_grid = {
-    'model__C': [0.1, 1.0, 10.0],
-    'model__solver': ['lbfgs', 'liblinear', 'saga'],  # all fine for binary
-}
-
-print("\nStarting GridSearchCV for Logistic Regression...")
-grid_start = time.time()
-
-grid_search = GridSearchCV(
-    estimator=base_lr_pipeline,
-    param_grid=param_grid,
-    scoring='roc_auc',
-    cv=3,
-    n_jobs=-1,
-    verbose=2
+# Random Forest:
+#   - One-hot encode cats
+#   - Pass numerics through (no scaling needed)
+preprocess_rf = ColumnTransformer(
+    transformers=[
+        ('cat', OneHotEncoder(handle_unknown='ignore'), cat_features),
+        ('num', 'passthrough', num_features),
+    ]
 )
 
-grid_search.fit(X_train, y_train)
 
-grid_end = time.time()
-grid_time = grid_end - grid_start
+# =====================================================
+# 6. MODEL COMPARISON: MULTIPLE LOGISTIC REGRESSIONS + RANDOM FORESTS
+# =====================================================
 
-print(f"\nGrid search finished in {grid_time:.2f} seconds")
-print("Best params:", grid_search.best_params_)
-print(f"Best CV ROC AUC: {grid_search.best_score_:.4f}")
+results = []          # to store model-level metrics
+roc_curves = {}       # model_name -> (fpr, tpr, auc)
+trained_models = {}   # keep fitted pipelines if you want to inspect later
 
-# Best model from grid search (already fitted on full training set)
-best_lr_clf = grid_search.best_estimator_
+# ---- Logistic Regression configurations ----
+log_reg_configs = [
+    {
+        "name": "LR_C0.1_L2",
+        "params": {"C": 0.1, "penalty": "l2", "class_weight": None}
+    },
+    {
+        "name": "LR_C1.0_L2",
+        "params": {"C": 1.0, "penalty": "l2", "class_weight": None}
+    },
+    {
+        "name": "LR_C10_L2",
+        "params": {"C": 10.0, "penalty": "l2", "class_weight": None}
+    },
+]
 
-# Evaluate on test set
-y_pred_lr = best_lr_clf.predict(X_test)
-y_prob_lr = best_lr_clf.predict_proba(X_test)[:, 1]
+# ---- Random Forest configurations  ----
+rf_configs = [
+    {
+        "name": "RF_50depth_5",
+        "params": {
+            "n_estimators": 50,
+            "max_depth": 5,
+            "min_samples_leaf": 10
+        }
+    },
+    {
+        "name": "RF_100depth_8",
+        "params": {
+            "n_estimators": 100,
+            "max_depth": 10,
+            "min_samples_leaf": 10
+        }
+    },
+    {
+        "name": "RF_150depth_10",
+        "params": {
+            "n_estimators": 150,
+            "max_depth": 15,
+            "min_samples_leaf": 20
+        }
+    },
+]
 
-test_acc = accuracy_score(y_test, y_pred_lr)
-test_auc = roc_auc_score(y_test, y_prob_lr)
+print("\n==============================")
+print("Training Logistic Regression models...")
+print("==============================")
 
-print("\n=== Logistic Regression (Best Model) on Test Set ===")
-print(f"Test Accuracy: {test_acc:.4f}")
-print(f"Test ROC AUC:  {test_auc:.4f}")
-print(classification_report(y_test, y_pred_lr, digits=4))
+for cfg in log_reg_configs:
+    name = cfg["name"]
+    p = cfg["params"]
+
+    lr_model = LogisticRegression(
+        C=p["C"],
+        penalty=p["penalty"],
+        class_weight=p["class_weight"],
+        max_iter=2000,
+        n_jobs=-1,
+        solver="lbfgs",
+    )
+
+    pipe = Pipeline(steps=[
+        ("preprocess", preprocess_lr),
+        ("model", lr_model)
+    ])
+
+    print(f"\n>>> Training {name} ...")
+    start = time.time()
+    pipe.fit(X_train, y_train)
+    end = time.time()
+
+    y_pred = pipe.predict(X_test)
+    y_prob = pipe.predict_proba(X_test)[:, 1]
+
+    acc = accuracy_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_prob)
+
+    # Save ROC curve
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    roc_curves[name] = (fpr, tpr, auc)
+
+    # Store metrics
+    results.append({
+        "model": name,
+        "family": "LogisticRegression",
+        "C": p["C"],
+        "penalty": p["penalty"],
+        "class_weight": str(p["class_weight"]),
+        "n_estimators": None,
+        "max_depth": None,
+        "min_samples_leaf": None,
+        "accuracy": acc,
+        "roc_auc": auc,
+        "train_time_sec": end - start,
+    })
+
+    trained_models[name] = pipe
+
+
+print("\n==============================")
+print("Training Random Forest models...")
+print("==============================")
+
+for cfg in rf_configs:
+    name = cfg["name"]
+    p = cfg["params"]
+
+    rf_model = RandomForestClassifier(
+        n_estimators=p["n_estimators"],
+        max_depth=p["max_depth"],
+        min_samples_leaf=p["min_samples_leaf"],
+        n_jobs=-1,
+        random_state=42,
+    )
+
+    pipe = Pipeline(steps=[
+        ("preprocess", preprocess_rf),
+        ("model", rf_model)
+    ])
+
+    print(f"\n>>> Training {name} ...")
+    start = time.time()
+    pipe.fit(X_train, y_train)
+    end = time.time()
+
+    y_pred = pipe.predict(X_test)
+    y_prob = pipe.predict_proba(X_test)[:, 1]
+
+    acc = accuracy_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_prob)
+
+    # Save ROC curve
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    roc_curves[name] = (fpr, tpr, auc)
+
+    # Store metrics
+    results.append({
+        "model": name,
+        "family": "RandomForest",
+        "C": None,
+        "penalty": None,
+        "class_weight": None,
+        "n_estimators": p["n_estimators"],
+        "max_depth": p["max_depth"],
+        "min_samples_leaf": p["min_samples_leaf"],
+        "accuracy": acc,
+        "roc_auc": auc,
+        "train_time_sec": end - start,
+    })
+
+    trained_models[name] = pipe
 
 
 # =====================================================
-# 6. OPENING PERFORMANCE BY ELO BRACKET
+# 7. RESULTS TABLE + PLOTS (Options 1 & 2)
 # =====================================================
 
-def elo_bracket(r):
-    if r <= 599:
-        return 'Under 600'
-    elif r <= 999:
-        return '600–999'
+results_df = pd.DataFrame(results)
+results_df = results_df.sort_values("roc_auc", ascending=False).reset_index(drop=True)
+
+print("\n=== Model comparison table (sorted by ROC AUC) ===")
+print(results_df.to_string(index=False))
+
+# ---------- OPTION 1: Zoomed-in bar charts ----------
+
+# Accuracy bar chart (zoomed)
+plt.figure(figsize=(10, 5))
+plt.bar(results_df["model"], results_df["accuracy"])
+plt.title("Model Accuracy Comparison (Zoomed In)")
+plt.xlabel("Model")
+plt.ylabel("Accuracy")
+plt.xticks(rotation=45, ha="right")
+plt.ylim(results_df["accuracy"].min() - 0.001,
+         results_df["accuracy"].max() + 0.001)
+plt.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ROC AUC bar chart (zoomed)
+plt.figure(figsize=(10, 5))
+plt.bar(results_df["model"], results_df["roc_auc"])
+plt.title("Model ROC AUC Comparison (Zoomed In)")
+plt.xlabel("Model")
+plt.ylabel("ROC AUC")
+plt.xticks(rotation=45, ha="right")
+plt.ylim(results_df["roc_auc"].min() - 0.001,
+         results_df["roc_auc"].max() + 0.001)
+plt.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# ---------- OPTION 2: Horizontal dot plot for ROC AUC ----------
+
+plt.figure(figsize=(10, 5))
+plt.scatter(results_df["roc_auc"], results_df["model"], s=120)
+plt.title("ROC AUC Comparison (Dot Plot)")
+plt.xlabel("ROC AUC")
+plt.grid(axis="x", alpha=0.3)
+
+# Zoom x-axis to highlight small differences
+plt.xlim(results_df["roc_auc"].min() - 0.001,
+         results_df["roc_auc"].max() + 0.001)
+
+plt.tight_layout()
+plt.show()
+
+# --- ROC curves for all models ---
+plt.figure(figsize=(10, 6))
+for name, (fpr, tpr, auc) in roc_curves.items():
+    plt.plot(fpr, tpr, label=f"{name} (AUC = {auc:.3f})")
+
+plt.plot([0, 1], [0, 1], "k--", label="Random baseline")
+plt.title("ROC Curves — All Models")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.legend(loc="lower right", fontsize=8)
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# Print classification report for the single best model by AUC
+best_model_name = results_df.iloc[0]["model"]
+print(f"\n=== Best model by ROC AUC: {best_model_name} ===")
+best_model = trained_models[best_model_name]
+best_pred = best_model.predict(X_test)
+print(classification_report(y_test, best_pred, digits=4))
+
+
+# =====================================================
+# 8. OPENING PERFORMANCE BY ELO BRACKET (SAME AS BEFORE)
+# =====================================================
+
+def elo_bracket(r: float) -> str:
+    """
+    Map average Elo rating to a coarse rating bracket.
+    These buckets are used to compare opening performance at different levels.
+    """
+    if r <= 999:
+        return 'Under 999'
     elif r <= 1399:
         return '1000–1399'
     elif r <= 1799:
@@ -216,9 +450,11 @@ def elo_bracket(r):
         return '2200+'
 
 
+# Apply Elo bracket mapping based on avg_elo
 df['elo_bracket'] = df['avg_elo'].apply(elo_bracket)
 
-MIN_GAMES = 150
+# Aggregate opening stats: number of games + white win rate per (bracket, ECO)
+MIN_GAMES = 100  # minimum number of games to consider opening stats reliable
 stats = (
     df.groupby(['elo_bracket', 'eco_code3'])
     .agg(
@@ -228,9 +464,10 @@ stats = (
     .reset_index()
 )
 
+# Filter out (bracket, ECO) pairs with too few games
 stats = stats[stats['games'] >= MIN_GAMES]
 
-print("\n=== Top Openings Per Elo Bracket ===")
+print("\n=== Top Openings Per Elo Bracket (by White Win Rate) ===")
 for bracket in stats['elo_bracket'].unique():
     print("\nELO BRACKET:", bracket)
     print(
@@ -239,21 +476,11 @@ for bracket in stats['elo_bracket'].unique():
         .head(5)
     )
 
-
-# =====================================================
-# 7. ROC CURVE FOR BEST LOGISTIC REGRESSION
-# =====================================================
-
-fpr, tpr, _ = roc_curve(y_test, y_prob_lr)
-
-plt.figure(figsize=(10, 6))
-plt.plot(fpr, tpr, label=f"Logistic Regression (AUC = {test_auc:.3f})")
-plt.plot([0, 1], [0, 1], 'k--', label="Random Guessing")
-
-plt.title("ROC Curve — Logistic Regression (Best Hyperparameters)")
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.legend(loc="lower right")
-plt.grid(alpha=0.3)
-plt.tight_layout()
-plt.show()
+print("\n=== Most Played Openings Per Elo Bracket (by Games) ===")
+for bracket in stats['elo_bracket'].unique():
+    print("\nELO BRACKET:", bracket)
+    print(
+        stats[stats['elo_bracket'] == bracket]
+        .sort_values('games', ascending=False)
+        .head(5)[['elo_bracket', 'eco_code3', 'games', 'white_win_rate']]
+    )
